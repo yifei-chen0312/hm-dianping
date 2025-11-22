@@ -46,7 +46,7 @@ public class UserServiceImpl extends ServiceImpl<UserMapper, User> implements IU
     @Resource
     private StringRedisTemplate stringRedisTemplate;
 
-//验证码
+    //验证码
     @Override
     public Result sendCode(String phone, HttpSession session) {
         //1检验手机号
@@ -61,14 +61,15 @@ public class UserServiceImpl extends ServiceImpl<UserMapper, User> implements IU
         //session.setAttribute("code", code);
 
         //改用redis代替session
-        stringRedisTemplate.opsForValue().set(LOGIN_CODE_KEY+phone,code,LOGIN_CODE_TTL);
+        stringRedisTemplate.opsForValue().set(LOGIN_CODE_KEY + phone, code, LOGIN_CODE_TTL,TimeUnit.MINUTES);
 
         //发送验证码
         log.debug("验证码为:{}", code);
 
         return Result.ok();
     }
-//用户登录
+
+    //用户登录
     @Override
     public Result login(LoginFormDTO loginForm, HttpSession session) {
         //1.判断手机号是否正确
@@ -81,8 +82,8 @@ public class UserServiceImpl extends ServiceImpl<UserMapper, User> implements IU
         String code = loginForm.getCode();
         //Object cachecode = session.getAttribute("code");
         //改用redis代替session
-        String cachecode = stringRedisTemplate.opsForValue().get(LOGIN_CODE_KEY+phone);
-        if(code == null || !cachecode.equals(code)){
+        String cachecode = stringRedisTemplate.opsForValue().get(LOGIN_CODE_KEY + phone);
+        if (code == null || !cachecode.equals(code)) {
             //验证码错误
             return Result.fail("验证码错误");
         }
@@ -90,9 +91,9 @@ public class UserServiceImpl extends ServiceImpl<UserMapper, User> implements IU
         User user = query().eq("phone", phone).one();
 
 
-        if(user == null){
+        if (user == null) {
             //手机号不存在创建新用户
-             user = CreateUser(phone);
+            user = CreateUser(phone);
         }
         //手机号存在，把用户保存到session
         //session.setAttribute("user", BeanUtil.copyProperties(user, UserDTO.class));
@@ -101,17 +102,17 @@ public class UserServiceImpl extends ServiceImpl<UserMapper, User> implements IU
         //把user对象转为hash对象存入redis里
         UserDTO userDTO = BeanUtil.copyProperties(user, UserDTO.class);
         //转变为map存入redis
-        Map<String, Object> stringObjectMap = BeanUtil.beanToMap(userDTO,new HashMap<>(),
+        Map<String, Object> stringObjectMap = BeanUtil.beanToMap(userDTO, new HashMap<>(),
                 CopyOptions.create()
                         .setIgnoreNullValue(true)
-                        .setFieldValueEditor((fieldName,fieldValue) -> fieldValue.toString())
-                );
+                        .setFieldValueEditor((fieldName, fieldValue) -> fieldValue.toString())
+        );
         //存储
-        stringRedisTemplate.opsForHash().putAll(LOGIN_USER_KEY+token,stringObjectMap);
+        stringRedisTemplate.opsForHash().putAll(LOGIN_USER_KEY + token, stringObjectMap);
 
         //设置对象的存活周期
-        String tokenkey = LOGIN_USER_KEY+token;
-        stringRedisTemplate.expire(tokenkey,LOGIN_USER_TTL, TimeUnit.MINUTES);
+        String tokenkey = LOGIN_USER_KEY + token;
+        stringRedisTemplate.expire(tokenkey, LOGIN_USER_TTL, TimeUnit.MINUTES);
         //返回token
         return Result.ok(token);
     }
