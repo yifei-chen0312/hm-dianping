@@ -1,29 +1,33 @@
 package com.hmdp.service.impl;
 
 import cn.hutool.core.bean.BeanUtil;
+import cn.hutool.core.collection.CollUtil;
 import cn.hutool.core.util.BooleanUtil;
 import cn.hutool.core.util.StrUtil;
 import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
 import com.hmdp.dto.Result;
+import com.hmdp.dto.ScrollResult;
 import com.hmdp.dto.UserDTO;
 import com.hmdp.entity.Blog;
+import com.hmdp.entity.Follow;
 import com.hmdp.entity.User;
 import com.hmdp.mapper.BlogMapper;
 import com.hmdp.service.IBlogService;
 import com.baomidou.mybatisplus.extension.service.impl.ServiceImpl;
+import com.hmdp.service.IFollowService;
 import com.hmdp.service.IUserService;
 import com.hmdp.utils.SystemConstants;
 import com.hmdp.utils.UserHolder;
 import org.springframework.data.redis.core.StringRedisTemplate;
+import org.springframework.data.redis.core.ZSetOperations;
 import org.springframework.stereotype.Service;
 
 import javax.annotation.Resource;
-import java.util.Collections;
-import java.util.List;
-import java.util.Set;
+import java.util.*;
 import java.util.stream.Collectors;
 
 import static com.hmdp.utils.RedisConstants.BOLG_LIKED_KEY;
+import static com.hmdp.utils.RedisConstants.FEED_KEY;
 
 /**
  * <p>
@@ -41,6 +45,9 @@ public class BlogServiceImpl extends ServiceImpl<BlogMapper, Blog> implements IB
     private IUserService userService;
     @Resource
     private StringRedisTemplate stringRedisTemplate;
+
+    @Resource
+    private IFollowService followService;
 
     @Override
     public Result queryBolgById(Integer current) {
@@ -121,6 +128,101 @@ public class BlogServiceImpl extends ServiceImpl<BlogMapper, Blog> implements IB
                 .collect(Collectors.toList());
         //4返回
         return Result.ok(userDTOS);
+    }
+
+    @Override
+    public Result saveBlog(Blog blog) {
+
+        //1获取登录用户
+        UserDTO user = UserHolder.getUser();
+        blog.setUserId(user.getId());
+        //2保存笔记
+        boolean isSuccess = save(blog);
+        if(!isSuccess){
+            return Result.fail("笔记保存失败");
+        }
+        //3查询粉丝 select * from tb_follow where follow_user_id = ?
+        List<Follow> follows = followService.query().eq("follow_user_id", user.getId()).list();
+        //4推送笔记给粉丝
+        for (Follow follow : follows) {
+            //4.1获取粉丝
+            Long followUserId = follow.getUserId();
+            String key =FEED_KEY + followUserId;
+            //4.2推送
+            stringRedisTemplate.opsForZSet().add(key,blog.getId().toString(),System.currentTimeMillis());
+        }
+        //返回
+        return Result.ok(blog.getId());
+    }
+
+    //@Override
+    //public Result queryBlogOfFollow(Long lastId, Integer offset) {
+        //1获取登录用户
+
+        //2查询收件箱
+
+        //3解析数据bolgId，minTime（时间戳）,offset
+
+        //
+        //return null;
+    //}
+    @Override
+    public Result queryBlogOfFollow(Long max, Integer offset) {
+        //1. 获取当前用户
+        Long userId = UserHolder.getUser().getId();
+        //2. 查询该用户收件箱（之前我们存的key是固定前缀 + 粉丝id），所以根据当前用户id就可以查询是否有关注的人发了笔记
+        String key = FEED_KEY + userId;
+        Set<ZSetOperations.TypedTuple<String>> typeTuples = stringRedisTemplate.opsForZSet()
+                .reverseRangeByScoreWithScores(key, 0, max, offset, 10);// 一次最多10条
+        //3. 非空判断
+        if (typeTuples == null || typeTuples.isEmpty()){
+            return Result.ok(Collections.emptyList());
+        }
+        //4. 解析数据，blogId、minTime（时间戳）、offset，这里指定创建的list大小，可以略微提高效率，因为我们知道这个list就得是这么大
+        List<Long> blogIds = new ArrayList<>(typeTuples.size());
+        long minTime = 0;
+        int newOffset = 1;
+        for (ZSetOperations.TypedTuple<String> typeTuple : typeTuples) {
+            //4.1 获取id
+            String id = typeTuple.getValue();
+            blogIds.add(Long.valueOf(id));
+
+            //4.2 获取score（时间戳）
+            long time = typeTuple.getScore().longValue();
+            if (time == minTime){
+                newOffset++;
+            }else {
+                minTime = time;
+                newOffset = 1;
+            }
+        }
+        // 4. 用 listByIds()，它内部自动处理：
+        //    - 空集合安全
+        //    - 自动生成 IN (?, ?, ?)
+        //    - 自动加上 ORDER BY FIELD(id, ?, ?, ?)
+        List<Blog> blogs = listByIds(blogIds);
+
+        if (CollUtil.isEmpty(blogs)) {
+            return Result.ok(Collections.emptyList());
+        }
+
+        // 5. 手动按收件箱顺序排序（因为 listByIds 的 FIELD 排序可能和我们期望的顺序不完全一致）
+        //    这一步保留原始时间线顺序，超级重要！
+        blogs.sort(Comparator.comparingInt(b -> blogIds.indexOf(b.getId())));
+
+        // 6. 查询用户信息 + 点赞状态（不变）
+        for (Blog blog : blogs) {
+            queryBlogUser(blog);
+            isBlogLiked(blog);
+        }
+
+        // 7. 封装返回
+        ScrollResult result = new ScrollResult();
+        result.setList(blogs);
+        result.setMinTime(minTime);
+        result.setOffset(newOffset);
+
+        return Result.ok(result);
     }
 
     //判断用户是否已经点
